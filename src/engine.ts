@@ -1478,7 +1478,30 @@ export class VoxtralEngine {
     toDestroy.push(semCodesBuf, acCodesBuf, semEmbed, acFloat, concatBuf);
     await flushAndDestroy('codec_preprocess');
 
-    // 5. Four decoder stages — each stage gets its own encoder to limit peak memory
+    // GPU buffer pool: recycles buffers by size to avoid repeated alloc/dealloc.
+    // Within a stage, both transformer layers use the same curT, so all buffer
+    // sizes are identical and layer 1 reuses layer 0's buffers with zero allocations.
+    const pool = new Map<number, GPUBuffer[]>();  // byteSize → free buffers
+    const poolAcquire = (byteSize: number, label: string): GPUBuffer => {
+      const bucket = pool.get(byteSize);
+      if (bucket && bucket.length > 0) return bucket.pop()!;
+      return this.createGPUBuffer(byteSize, label);
+    };
+    const poolRelease = (...bufs: GPUBuffer[]) => {
+      for (const buf of bufs) {
+        const sz = buf.size;
+        let bucket = pool.get(sz);
+        if (!bucket) { bucket = []; pool.set(sz, bucket); }
+        bucket.push(buf);
+      }
+    };
+    const poolDrainAndDestroy = () => {
+      for (const bucket of pool.values()) {
+        for (const buf of bucket) buf.destroy();
+      }
+      pool.clear();
+    };
+
     const stageStrides = [2, 2, 2, 1];
     const stageKernels = [4, 4, 4, 3];
     const windows = [2, 4, 8, 16];
@@ -1496,7 +1519,7 @@ export class VoxtralEngine {
         const layerBufSize = curT * codDim * 4;
         // Reuse tmpBuf, expand if needed
         if (tmpBuf.size < layerBufSize) {
-          toDestroy.push(tmpBuf);
+          tmpBuf.destroy();
           tmpBuf = this.createGPUBuffer(layerBufSize, 'codec_tmp');
         }
         const normBuf = tmpBuf;
@@ -1510,15 +1533,15 @@ export class VoxtralEngine {
 
         // Batched RMSNorm
         const bNormP = this.packUniform([{ u: codDim }, { f: codec.norm_eps }, { u: curT }]);
-        const attnNormed = this.createGPUBuffer(layerBufSize, 'codec_attn_normed');
+        const attnNormed = poolAcquire(layerBufSize, 'codec_attn_normed');
         dp(P.batchedRmsNorm,
           [curBuf, TL.attn_norm, attnNormed, bNormP],
           [curT], `codec_s${stage}_l${layerIdx}_attn_norm`);
 
         // Q/K/V projections (batched)
-        const qBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_q');
-        const kBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_k');
-        const vBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_v');
+        const qBuf = poolAcquire(layerBufSize, 'codec_q');
+        const kBuf = poolAcquire(layerBufSize, 'codec_k');
+        const vBuf = poolAcquire(layerBufSize, 'codec_v');
 
         const bMvP = this.packUniform([{ u: codDim }, { u: codDim }, { u: curT }]);
         dp(P.batchedMatvecF16,
@@ -1542,7 +1565,8 @@ export class VoxtralEngine {
 
         // ALiBi attention scores (windowed: O(T×W) instead of O(T²))
         const W = windows[stage];
-        const scoresBuf = this.createGPUBuffer(codec.n_heads * curT * W * 4, 'codec_scores');
+        const scoresSize = codec.n_heads * curT * W * 4;
+        const scoresBuf = poolAcquire(scoresSize, 'codec_scores');
         const alibiP = this.packUniform([
           { u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W },
         ]);
@@ -1556,14 +1580,14 @@ export class VoxtralEngine {
           [cdiv(codec.n_heads * curT, 64)], `codec_s${stage}_l${layerIdx}_softmax`);
 
         // Attention value
-        const attnOutBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_attn_out');
+        const attnOutBuf = poolAcquire(layerBufSize, 'codec_attn_out');
         const cValP = this.packUniform([{ u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W }]);
         dp(P.codecAttnValue,
           [scoresBuf, vBuf, attnOutBuf, cValP],
           [cdiv(codec.n_heads * codec.head_dim, 64), curT], `codec_s${stage}_l${layerIdx}_attn_val`);
 
         // Output projection
-        const woBuf = this.createGPUBuffer(layerBufSize, 'codec_wo_out');
+        const woBuf = poolAcquire(layerBufSize, 'codec_wo_out');
         dp(P.batchedMatvecF16,
           [TL.wo, attnOutBuf, woBuf, bMvP], [codDim, curT],
           `codec_s${stage}_l${layerIdx}_wo`);
@@ -1580,15 +1604,16 @@ export class VoxtralEngine {
           `codec_s${stage}_l${layerIdx}_copy_ffn_res`);
 
         // Norm
-        const ffnNormed = this.createGPUBuffer(layerBufSize, 'codec_ffn_normed');
+        const ffnNormed = poolAcquire(layerBufSize, 'codec_ffn_normed');
         dp(P.batchedRmsNorm,
           [curBuf, TL.ffn_norm, ffnNormed, bNormP],
           [curT], `codec_s${stage}_l${layerIdx}_ffn_norm`);
 
         // Gate + Up projections
         const hiddenSize = curT * codec.hidden_dim;
-        const gateBuf = this.createGPUBuffer(hiddenSize * 4, 'codec_gate');
-        const upBuf = this.createGPUBuffer(hiddenSize * 4, 'codec_up');
+        const hiddenBufSize = hiddenSize * 4;
+        const gateBuf = poolAcquire(hiddenBufSize, 'codec_gate');
+        const upBuf = poolAcquire(hiddenBufSize, 'codec_up');
         const ffnMvP = this.packUniform([{ u: codec.hidden_dim }, { u: codDim }, { u: curT }]);
         dp(P.batchedMatvecF16,
           [TL.w1, ffnNormed, gateBuf, ffnMvP], [codec.hidden_dim, curT],
@@ -1606,7 +1631,7 @@ export class VoxtralEngine {
           [swiGridX, swiGridY], `codec_s${stage}_l${layerIdx}_swiglu`);
 
         // Down projection
-        const downBuf = this.createGPUBuffer(layerBufSize, 'codec_down');
+        const downBuf = poolAcquire(layerBufSize, 'codec_down');
         const downMvP = this.packUniform([{ u: codDim }, { u: codec.hidden_dim }, { u: curT }]);
         dp(P.batchedMatvecF16,
           [TL.w2, gateBuf, downBuf, downMvP], [codDim, curT],
@@ -1617,14 +1642,23 @@ export class VoxtralEngine {
           [downBuf, TL.ffn_scale, normBuf, curBuf, lsP],
           [cdiv(totalElems, 256)], `codec_s${stage}_l${layerIdx}_ffn_res`);
 
-        // Submit this layer and free all its intermediates immediately
-        toDestroy.push(attnNormed, qBuf, kBuf, vBuf, scoresBuf,
+        // Submit this layer, then recycle buffers back to pool for next layer
+        d.pushErrorScope('validation');
+        d.queue.submit([encoder.finish()]);
+        await d.queue.onSubmittedWorkDone();
+        const err = await d.popErrorScope();
+        if (err) {
+          (globalThis as any).__codecError = `codec_s${stage}_l${layerIdx}: ${err.message}`;
+        }
+        poolRelease(attnNormed, qBuf, kBuf, vBuf, scoresBuf,
           attnOutBuf, woBuf, ffnNormed, gateBuf, upBuf, downBuf);
-        await flushAndDestroy(`codec_s${stage}_l${layerIdx}`);
       }
 
       // Conv transpose upsample (stages 0-2 have conv_up with stride 2)
       if (stageData.conv_w && stageData.conv_scale && stageStrides[stage] > 1) {
+        // Drain pool before upsample — sizes will change
+        poolDrainAndDestroy();
+
         encoder = d.createCommandEncoder({ label: `codec_s${stage}_conv` });
         const newT = curT * stageStrides[stage];
         const upsampledBuf = this.createGPUBuffer(newT * codDim * 4, 'codec_upsampled');
@@ -1642,6 +1676,9 @@ export class VoxtralEngine {
         await flushAndDestroy(`codec_s${stage}_conv`);
       }
     }
+
+    // Drain any remaining pooled buffers
+    poolDrainAndDestroy();
 
     // 6. Output conv: CausalConv1d(1024→240, k=7)
     encoder = d.createCommandEncoder({ label: 'codec_output' });
