@@ -196,53 +196,27 @@
     textarea::placeholder { color: var(--text-dim); }
 
     /* Voice selector */
-    .voice-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-      gap: 8px;
-      margin-top: 6px;
-    }
-    .voice-group-label {
-      grid-column: 1 / -1;
-      font-size: 0.7em;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--text-dim);
-      margin-top: 8px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid var(--border);
-    }
-    .voice-group-label:first-child { margin-top: 0; }
-    .voice-option {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border);
+    .voice-select {
+      width: 100%;
+      padding: 10px 14px;
       background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 15px;
+      font-family: inherit;
       cursor: pointer;
-      transition: all 0.15s;
-      font-size: 0.9em;
+      transition: border-color 0.2s;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%238888a0' fill='none' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 36px;
     }
-    .voice-option:hover { border-color: var(--border-hover); background: var(--surface-2); }
-    .voice-option.selected { border-color: var(--accent); background: var(--accent-glow); }
-    .voice-option input { display: none; }
-    .voice-radio {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      border: 2px solid var(--border);
-      flex-shrink: 0;
-      transition: all 0.15s;
-    }
-    .voice-option.selected .voice-radio {
-      border-color: var(--accent);
-      background: var(--accent);
-      box-shadow: inset 0 0 0 2px var(--bg);
-    }
-    .voice-name { font-weight: 500; }
+    .voice-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+    .voice-select option { background: var(--surface); color: var(--text); }
+    .voice-select optgroup { color: var(--text-muted); font-weight: 600; font-size: 0.9em; }
 
     /* Button */
     .btn {
@@ -508,15 +482,8 @@
 
     <!-- Hero -->
     <section class="hero">
-      <h2>Text to speech,<br><span>entirely in your browser</span></h2>
+      <h2><span>Voxtral TTS</span> WebGPU</h2>
       <p>Mistral's Voxtral 4B running via WebGPU. 20 voices, 9 languages, 24kHz audio. No server, no API keys.</p>
-      <div class="hero-badges">
-        <span class="badge"><strong>4B</strong> parameters</span>
-        <span class="badge"><strong>20</strong> voices</span>
-        <span class="badge"><strong>9</strong> languages</span>
-        <span class="badge"><strong>24kHz</strong> audio</span>
-        <span class="badge"><strong>0</strong> dependencies</span>
-      </div>
     </section>
 
     <!-- Status -->
@@ -550,13 +517,10 @@
       <textarea id="text" placeholder="Type something to synthesize...">Hello, this is Voxtral running entirely in your browser using WebGPU compute shaders. No server needed.</textarea>
 
       <div style="margin-top: 16px;">
-        <label>Voice</label>
-        <div class="voice-grid" id="voiceGrid">
-          <div class="voice-option selected">
-            <div class="voice-radio"></div>
-            <span class="voice-name">Loading voices...</span>
-          </div>
-        </div>
+        <label for="voiceSelect">Voice</label>
+        <select id="voiceSelect" class="voice-select">
+          <option value="">Loading voices...</option>
+        </select>
       </div>
 
       <button class="btn" id="generateBtn" disabled>
@@ -921,8 +885,8 @@
     }
 
     function populateVoiceGrid(voices) {
-      const grid = document.getElementById('voiceGrid');
-      grid.innerHTML = '';
+      const select = document.getElementById('voiceSelect');
+      select.innerHTML = '';
 
       // Group by language
       const groups = {};
@@ -940,25 +904,22 @@
       });
 
       for (const lang of sortedLangs) {
-        const label = document.createElement('div');
-        label.className = 'voice-group-label';
-        label.textContent = lang;
-        grid.appendChild(label);
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = lang;
 
         for (const voice of groups[lang].sort()) {
-          const opt = document.createElement('label');
-          opt.className = 'voice-option' + (voice === selectedVoice ? ' selected' : '');
-          opt.innerHTML = '<input type="radio" name="voice" value="' + voice + '"' + (voice === selectedVoice ? ' checked' : '') + '>'
-            + '<div class="voice-radio"></div>'
-            + '<span class="voice-name">' + capitalize(voice) + '</span>';
-          opt.addEventListener('click', () => {
-            selectedVoice = voice;
-            grid.querySelectorAll('.voice-option').forEach(el => el.classList.remove('selected'));
-            opt.classList.add('selected');
-          });
-          grid.appendChild(opt);
+          const option = document.createElement('option');
+          option.value = voice;
+          option.textContent = capitalize(voice);
+          if (voice === selectedVoice) option.selected = true;
+          optgroup.appendChild(option);
         }
+        select.appendChild(optgroup);
       }
+
+      select.addEventListener('change', () => {
+        selectedVoice = select.value;
+      });
     }
 
     // ---- Generate ----
