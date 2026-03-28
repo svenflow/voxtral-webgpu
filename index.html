@@ -511,11 +511,22 @@
         <label for="text">Text</label>
         <textarea id="text" placeholder="Type something to synthesize...">Hello, this is Voxtral running entirely in your browser using WebGPU compute shaders. No server needed.</textarea>
 
-        <div style="margin-top: 16px;">
-          <label for="voiceSelect">Voice</label>
-          <select id="voiceSelect" class="voice-select">
-            <option value="">Loading voices...</option>
-          </select>
+        <div style="margin-top: 16px; display: flex; gap: 16px;">
+          <div style="flex: 1;">
+            <label for="voiceSelect">Voice</label>
+            <select id="voiceSelect" class="voice-select">
+              <option value="">Loading voices...</option>
+            </select>
+          </div>
+          <div style="flex: 0 0 140px;">
+            <label for="maxDuration">Max Duration</label>
+            <select id="maxDuration" class="voice-select">
+              <option value="500">40s</option>
+              <option value="750">1 min</option>
+              <option value="1500" selected>2 min</option>
+              <option value="3750">5 min</option>
+            </select>
+          </div>
         </div>
 
         <button class="btn" id="generateBtn" disabled>
@@ -974,8 +985,6 @@
       genCounter.textContent = 'Frame 0';
       genProgressFill.style.width = '0%';
 
-      document.getElementById('stageBackbone').classList.add('active');
-
       try {
         print('\nGenerating: "' + text + '" (voice: ' + selectedVoice + ')');
 
@@ -996,12 +1005,20 @@
         const wordCount = text.split(/\s+/).length;
         const estimatedFrames = Math.max(50, Math.round(wordCount * 3.5));
 
+        const stageMap = {
+          backbone: { el: 'stageBackbone', time: 'stageBackboneTime' },
+          fm: { el: 'stageFM', time: 'stageFMTime' },
+          codec: { el: 'stageCodec', time: 'stageCodecTime' },
+        };
+
+        const maxFrames = parseInt(document.getElementById('maxDuration').value) || 1500;
+
         const result = await engine.generate(
           tokens,
           audioTokenStart,
           audioTokenCount,
           voiceEmbeddings,
-          500,
+          maxFrames,
           (frame, semCode, acCodes) => {
             const pct = Math.min(100, Math.round((frame / estimatedFrames) * 100));
             genProgressFill.style.width = pct + '%';
@@ -1010,15 +1027,22 @@
               print('  Frame ' + frame + ': semantic=' + semCode);
             }
           },
+          (stage, doneMs) => {
+            const s = stageMap[stage];
+            if (!s) return;
+            const el = document.getElementById(s.el);
+            const timeEl = document.getElementById(s.time);
+            if (doneMs !== undefined) {
+              // Stage completed
+              el.className = 'gen-stage-item done';
+              timeEl.textContent = doneMs.toFixed(0) + 'ms';
+            } else {
+              // Stage starting
+              el.className = 'gen-stage-item active';
+            }
+          },
         );
 
-        // Update stage indicators
-        document.getElementById('stageBackbone').className = 'gen-stage-item done';
-        document.getElementById('stageBackboneTime').textContent = result.stats.backboneMs.toFixed(0) + 'ms';
-        document.getElementById('stageFM').className = 'gen-stage-item done';
-        document.getElementById('stageFMTime').textContent = result.stats.fmMs.toFixed(0) + 'ms';
-        document.getElementById('stageCodec').className = 'gen-stage-item done';
-        document.getElementById('stageCodecTime').textContent = result.stats.codecMs.toFixed(0) + 'ms';
         genProgressFill.style.width = '100%';
         genCounter.textContent = result.stats.framesGenerated + ' frames done';
 

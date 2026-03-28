@@ -1460,7 +1460,7 @@ export class VoxtralEngine {
     ]);
     dp(P.causalConv1d,
       [concatBuf, M.codec_input_conv_w, M.codec_input_conv_g, curBuf, inputConvParams],
-      [cdiv(codDim * curT, 64)], 'codec_input_conv');
+      [cdiv(curT, 64), codDim], 'codec_input_conv');
 
     // 5. Four decoder stages
     // Strides/kernels per stage (stages 0-2 have conv_up with stride 2, stage 3 has none)
@@ -1525,26 +1525,27 @@ export class VoxtralEngine {
         dp(P.qkNorm, [kBuf, TL.k_norm, qkNP],
           [cdiv(curT * codec.n_heads, 128)], `codec_s${stage}_l${layerIdx}_knorm`);
 
-        // ALiBi attention scores
-        const scoresBuf = this.createGPUBuffer(codec.n_heads * curT * curT * 4, 'codec_scores');
+        // ALiBi attention scores (windowed: O(T×W) instead of O(T²))
+        const W = windows[stage];
+        const scoresBuf = this.createGPUBuffer(codec.n_heads * curT * W * 4, 'codec_scores');
         const alibiP = this.packUniform([
-          { u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: windows[stage] },
+          { u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W },
         ]);
         dp(P.alibiAttnScore,
           [qBuf, kBuf, scoresBuf, alibiP],
-          [cdiv(curT, 64), curT, codec.n_heads], `codec_s${stage}_l${layerIdx}_attn_score`);
+          [cdiv(W, 64), curT, codec.n_heads], `codec_s${stage}_l${layerIdx}_attn_score`);
 
         // Softmax
-        const cSoftP = this.packUniform([{ u: codec.n_heads }, { u: curT }]);
+        const cSoftP = this.packUniform([{ u: codec.n_heads }, { u: curT }, { u: W }]);
         dp(P.codecSoftmax, [scoresBuf, cSoftP],
           [cdiv(codec.n_heads * curT, 64)], `codec_s${stage}_l${layerIdx}_softmax`);
 
         // Attention value
         const attnOutBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_attn_out');
-        const cValP = this.packUniform([{ u: codec.n_heads }, { u: codec.head_dim }, { u: curT }]);
+        const cValP = this.packUniform([{ u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W }]);
         dp(P.codecAttnValue,
           [scoresBuf, vBuf, attnOutBuf, cValP],
-          [cdiv(curT * codec.n_heads * codec.head_dim, 64)], `codec_s${stage}_l${layerIdx}_attn_val`);
+          [cdiv(codec.n_heads * codec.head_dim, 64), curT], `codec_s${stage}_l${layerIdx}_attn_val`);
 
         // Output projection
         const woBuf = this.createGPUBuffer(layerBufSize, 'codec_wo_out');
@@ -1581,11 +1582,13 @@ export class VoxtralEngine {
           [TL.w3, ffnNormed, upBuf, ffnMvP], [codec.hidden_dim, curT],
           `codec_s${stage}_l${layerIdx}_up`);
 
-        // SwiGLU (in-place)
-        const swiP = this.packUniform([{ u: hiddenSize }]);
+        // SwiGLU (in-place) — 2D dispatch to avoid exceeding 65535 workgroup limit
+        const swiGridX = Math.min(cdiv(hiddenSize, 256), 65535);
+        const swiGridY = cdiv(cdiv(hiddenSize, 256), swiGridX);
+        const swiP = this.packUniform([{ u: hiddenSize }, { u: swiGridX }]);
         dp(P.batchedSwiGLU,
           [gateBuf, upBuf, swiP],
-          [cdiv(hiddenSize, 256)], `codec_s${stage}_l${layerIdx}_swiglu`);
+          [swiGridX, swiGridY], `codec_s${stage}_l${layerIdx}_swiglu`);
 
         // Down projection
         const downBuf = this.createGPUBuffer(layerBufSize, 'codec_down');
@@ -1614,7 +1617,7 @@ export class VoxtralEngine {
         ]);
         dp(P.causalConvTranspose1d,
           [curBuf, stageData.conv_w, stageData.conv_scale, upsampledBuf, convP],
-          [cdiv(codDim * newT, 64)], `codec_s${stage}_conv_up`);
+          [cdiv(newT, 64), codDim], `codec_s${stage}_conv_up`);
 
         toDestroy.push(curBuf);
         curBuf = upsampledBuf;
@@ -1630,7 +1633,7 @@ export class VoxtralEngine {
     ]);
     dp(P.causalConv1d,
       [curBuf, M.codec_output_conv_w, M.codec_output_conv_g, outBuf, outConvP],
-      [cdiv(codec.patch_size * outT, 64)], 'codec_output_conv');
+      [cdiv(outT, 64), codec.patch_size], 'codec_output_conv');
 
     d.pushErrorScope('validation');
     d.queue.submit([encoder.finish()]);
@@ -1734,7 +1737,7 @@ export class VoxtralEngine {
       ]);
       dp(encoder, P.causalConv1d,
         [concatBuf, M.codec_input_conv_w, M.codec_input_conv_g, curBuf, inputConvParams],
-        [cdiv(codDim * curT, 64)], 'codec_input_conv');
+        [cdiv(curT, 64), codDim], 'codec_input_conv');
 
       d.queue.submit([encoder.finish()]);
       await d.queue.onSubmittedWorkDone();
@@ -1801,23 +1804,24 @@ export class VoxtralEngine {
         dp(encoder, P.qkNorm, [kBuf, TL.k_norm, qkNP],
           [cdiv(curT * codec.n_heads, 128)], `codec_s${stage}_l${layerIdx}_knorm`);
 
-        const scoresBuf = this.createGPUBuffer(codec.n_heads * curT * curT * 4, 'codec_scores');
+        const W = windows[stage];
+        const scoresBuf = this.createGPUBuffer(codec.n_heads * curT * W * 4, 'codec_scores');
         const alibiP = this.packUniform([
-          { u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: windows[stage] },
+          { u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W },
         ]);
         dp(encoder, P.alibiAttnScore,
           [qBuf, kBuf, scoresBuf, alibiP],
-          [cdiv(curT, 64), curT, codec.n_heads], `codec_s${stage}_l${layerIdx}_attn_score`);
+          [cdiv(W, 64), curT, codec.n_heads], `codec_s${stage}_l${layerIdx}_attn_score`);
 
-        const cSoftP = this.packUniform([{ u: codec.n_heads }, { u: curT }]);
+        const cSoftP = this.packUniform([{ u: codec.n_heads }, { u: curT }, { u: W }]);
         dp(encoder, P.codecSoftmax, [scoresBuf, cSoftP],
           [cdiv(codec.n_heads * curT, 64)], `codec_s${stage}_l${layerIdx}_softmax`);
 
         const attnOutBuf = this.createGPUBuffer(curT * codDim * 4, 'codec_attn_out');
-        const cValP = this.packUniform([{ u: codec.n_heads }, { u: codec.head_dim }, { u: curT }]);
+        const cValP = this.packUniform([{ u: codec.n_heads }, { u: codec.head_dim }, { u: curT }, { u: W }]);
         dp(encoder, P.codecAttnValue,
           [scoresBuf, vBuf, attnOutBuf, cValP],
-          [cdiv(curT * codec.n_heads * codec.head_dim, 64)], `codec_s${stage}_l${layerIdx}_attn_val`);
+          [cdiv(codec.n_heads * codec.head_dim, 64), curT], `codec_s${stage}_l${layerIdx}_attn_val`);
 
         const woBuf = this.createGPUBuffer(layerBufSize, 'codec_wo_out');
         dp(encoder, P.batchedMatvecF16,
@@ -1849,10 +1853,12 @@ export class VoxtralEngine {
           [TL.w3, ffnNormed, upBuf, ffnMvP], [codec.hidden_dim, curT],
           `codec_s${stage}_l${layerIdx}_up`);
 
-        const swiP = this.packUniform([{ u: hiddenSize }]);
+        const swiGridX2 = Math.min(cdiv(hiddenSize, 256), 65535);
+        const swiGridY2 = cdiv(cdiv(hiddenSize, 256), swiGridX2);
+        const swiP = this.packUniform([{ u: hiddenSize }, { u: swiGridX2 }]);
         dp(encoder, P.batchedSwiGLU,
           [gateBuf, upBuf, swiP],
-          [cdiv(hiddenSize, 256)], `codec_s${stage}_l${layerIdx}_swiglu`);
+          [swiGridX2, swiGridY2], `codec_s${stage}_l${layerIdx}_swiglu`);
 
         const downBuf = this.createGPUBuffer(layerBufSize, 'codec_down');
         const downMvP = this.packUniform([{ u: codDim }, { u: codec.hidden_dim }, { u: curT }]);
@@ -1878,7 +1884,7 @@ export class VoxtralEngine {
         ]);
         dp(encoder, P.causalConvTranspose1d,
           [curBuf, stageData.conv_w, stageData.conv_scale, upsampledBuf, convP],
-          [cdiv(codDim * newT, 64)], `codec_s${stage}_conv_up`);
+          [cdiv(newT, 64), codDim], `codec_s${stage}_conv_up`);
 
         // Submit this stage
         d.queue.submit([encoder.finish()]);
@@ -1910,7 +1916,7 @@ export class VoxtralEngine {
       const encoder = d.createCommandEncoder({ label: 'codec_output' });
       dp(encoder, P.causalConv1d,
         [curBuf, M.codec_output_conv_w, M.codec_output_conv_g, outBuf, outConvP],
-        [cdiv(codec.patch_size * outT, 64)], 'codec_output_conv');
+        [cdiv(outT, 64), codec.patch_size], 'codec_output_conv');
       d.queue.submit([encoder.finish()]);
       await d.queue.onSubmittedWorkDone();
 
@@ -2368,11 +2374,13 @@ export class VoxtralEngine {
     voiceEmbeddings: Float32Array | null,
     maxFrames: number = 500,
     onFrame?: (frame: number, semanticCode: number, acousticCodes: Uint32Array) => void,
+    onStage?: (stage: 'backbone' | 'fm' | 'codec', doneMs?: number) => void,
   ): Promise<TTSResult> {
     if (!this.isReady) throw new Error('Engine not initialized. Call init() and loadWeights() first.');
 
     this.reset();
     const t0 = performance.now();
+    onStage?.('backbone');
 
     // --- Phase 1: Prefill backbone with prompt tokens ---
     // Process all tokens: BOS, BEGIN_AUDIO, AUDIO×N, TEXT_TO_AUDIO, text, AUDIO_TO_TEXT, BEGIN_AUDIO
@@ -2414,6 +2422,8 @@ export class VoxtralEngine {
     }
 
     const tPrefill = performance.now();
+    onStage?.('backbone', tPrefill - t0);
+    onStage?.('fm');
 
     // --- AUDIO token kick: feed AUDIO(24) through TEXT embedding to get first hidden state ---
     // Matches MLX/vLLM-Omni: after prefill, one backbone step with AUDIO token produces
@@ -2525,6 +2535,8 @@ export class VoxtralEngine {
     }
 
     const tGenerate = performance.now();
+    onStage?.('fm', tGenerate - tPrefill);
+    onStage?.('codec');
 
     // --- Phase 3: Codec decode (batch all frames) ---
     let audio: Float32Array;
@@ -2537,6 +2549,7 @@ export class VoxtralEngine {
     }
 
     const tCodec = performance.now();
+    onStage?.('codec', tCodec - tGenerate);
 
     return {
       semanticCodes,

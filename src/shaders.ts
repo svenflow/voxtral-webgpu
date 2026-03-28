@@ -936,13 +936,11 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
+  // 2D dispatch: gid.x = t_out (within workgroups), gid.y = co
+  let t_out = gid.x;
+  let co = gid.y;
   let n_frames_out = params.n_frames;
-  let total = params.c_out * n_frames_out;
-  if (idx >= total) { return; }
-
-  let co = idx / n_frames_out;
-  let t_out = idx % n_frames_out;
+  if (t_out >= n_frames_out || co >= params.c_out) { return; }
 
   // Get weight norm scale
   let gPacked = g[co / 2u];
@@ -1081,12 +1079,10 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
-  let total = params.c_out * params.n_frames_out;
-  if (idx >= total) { return; }
-
-  let co = idx / params.n_frames_out;
-  let t_out = idx % params.n_frames_out;
+  // 2D dispatch: gid.x = t_out (within workgroups), gid.y = co
+  let t_out = gid.x;
+  let co = gid.y;
+  if (t_out >= params.n_frames_out || co >= params.c_out) { return; }
 
   // Transposed convolution with per-c_in weight normalization
   var sum: f32 = 0.0;
@@ -1438,31 +1434,33 @@ struct Params {
   n_heads: u32,
   head_dim: u32,
   seq_len: u32,
-  window: u32,      // sliding window size (0 = full attention)
+  window: u32,      // sliding window size (must be > 0)
 }
 
 @group(0) @binding(0) var<storage, read> q: array<f32>;     // [seq_len, n_heads, head_dim]
 @group(0) @binding(1) var<storage, read> k: array<f32>;     // [seq_len, n_heads, head_dim]
-@group(0) @binding(2) var<storage, read_write> scores: array<f32>;  // [n_heads, seq_len, seq_len]
+@group(0) @binding(2) var<storage, read_write> scores: array<f32>;  // [n_heads, seq_len, window]
 @group(0) @binding(3) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  // gid.x = ki_group (within seq_len), gid.y = qi, gid.z = head
-  let ki = gid.x;
+  // gid.x = slot (within window), gid.y = qi, gid.z = head
+  let slot = gid.x;
   let qi = gid.y;
   let h = gid.z;
-  if (ki >= params.seq_len || qi >= params.seq_len || h >= params.n_heads) { return; }
-  let idx = h * params.seq_len * params.seq_len + qi * params.seq_len + ki;
+  let W = params.window;
+  if (slot >= W || qi >= params.seq_len || h >= params.n_heads) { return; }
 
-  // Causal mask: ki > qi means future — mask out
+  let idx = h * params.seq_len * W + qi * W + slot;
+
+  // Map slot to actual key position
+  // ki_start = max(0, qi - W + 1), ki = ki_start + slot
+  var ki_start: u32 = 0u;
+  if (qi + 1u > W) { ki_start = qi - W + 1u; }
+  let ki = ki_start + slot;
+
+  // Inactive slot (beyond causal boundary or past qi)
   if (ki > qi) {
-    scores[idx] = -1e30;
-    return;
-  }
-
-  // Sliding window mask
-  if (params.window > 0u && qi - ki >= params.window) {
     scores[idx] = -1e30;
     return;
   }
@@ -1493,9 +1491,10 @@ export const codecSoftmax = /* wgsl */ `
 struct Params {
   n_heads: u32,
   seq_len: u32,
+  window: u32,
 }
 
-@group(0) @binding(0) var<storage, read_write> scores: array<f32>;
+@group(0) @binding(0) var<storage, read_write> scores: array<f32>;  // [n_heads, seq_len, window]
 @group(0) @binding(1) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
@@ -1506,21 +1505,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let h = idx / params.seq_len;
   let qi = idx % params.seq_len;
-  let base = h * params.seq_len * params.seq_len + qi * params.seq_len;
+  let W = params.window;
+  let base = h * params.seq_len * W + qi * W;
 
   var maxVal: f32 = -1e30;
-  for (var j: u32 = 0u; j < params.seq_len; j++) {
+  for (var j: u32 = 0u; j < W; j++) {
     maxVal = max(maxVal, scores[base + j]);
   }
 
   var expSum: f32 = 0.0;
-  for (var j: u32 = 0u; j < params.seq_len; j++) {
+  for (var j: u32 = 0u; j < W; j++) {
     let e = exp(scores[base + j] - maxVal);
     scores[base + j] = e;
     expSum += e;
   }
 
-  for (var j: u32 = 0u; j < params.seq_len; j++) {
+  for (var j: u32 = 0u; j < W; j++) {
     scores[base + j] /= expSum;
   }
 }
@@ -1535,33 +1535,41 @@ struct Params {
   n_heads: u32,
   head_dim: u32,
   seq_len: u32,
+  window: u32,
 }
 
-@group(0) @binding(0) var<storage, read> scores: array<f32>;   // [n_heads, seq_len, seq_len]
+@group(0) @binding(0) var<storage, read> scores: array<f32>;   // [n_heads, seq_len, window]
 @group(0) @binding(1) var<storage, read> v: array<f32>;        // [seq_len, n_heads, head_dim]
 @group(0) @binding(2) var<storage, read_write> output: array<f32>; // [seq_len, n_heads, head_dim]
 @group(0) @binding(3) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
-  let total = params.seq_len * params.n_heads * params.head_dim;
-  if (idx >= total) { return; }
+  // 2D dispatch: gid.x = within (n_heads * head_dim), gid.y = qi
+  let hd_idx = gid.x;
+  let qi = gid.y;
+  let nhd = params.n_heads * params.head_dim;
+  if (hd_idx >= nhd || qi >= params.seq_len) { return; }
 
-  let qi = idx / (params.n_heads * params.head_dim);
-  let rem = idx % (params.n_heads * params.head_dim);
-  let h = rem / params.head_dim;
-  let d = rem % params.head_dim;
+  let h = hd_idx / params.head_dim;
+  let d = hd_idx % params.head_dim;
+  let W = params.window;
+
+  // ki_start = max(0, qi - W + 1)
+  var ki_start: u32 = 0u;
+  if (qi + 1u > W) { ki_start = qi - W + 1u; }
 
   var sum: f32 = 0.0;
-  let scoreBase = h * params.seq_len * params.seq_len + qi * params.seq_len;
-  for (var ki: u32 = 0u; ki < params.seq_len; ki++) {
-    let score = scores[scoreBase + ki];
+  let scoreBase = h * params.seq_len * W + qi * W;
+  for (var slot: u32 = 0u; slot < W; slot++) {
+    let ki = ki_start + slot;
+    if (ki > qi) { break; }
+    let score = scores[scoreBase + slot];
     let vIdx = ki * params.n_heads * params.head_dim + h * params.head_dim + d;
     sum += score * v[vIdx];
   }
 
-  output[idx] = sum;
+  output[qi * nhd + hd_idx] = sum;
 }
 `;
 
@@ -1689,7 +1697,8 @@ fn main(
  */
 export const batchedSwiGLU = /* wgsl */ `
 struct Params {
-  total: u32,  // T * hidden_dim
+  total: u32,    // T * hidden_dim
+  grid_x: u32,   // number of workgroups in x dimension (for 2D dispatch)
 }
 
 @group(0) @binding(0) var<storage, read_write> gate: array<f32>;  // in-place output
@@ -1698,7 +1707,7 @@ struct Params {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
+  let i = gid.y * params.grid_x * 256u + gid.x;
   if (i >= params.total) { return; }
   let g = gate[i];
   let silu = g / (1.0 + exp(-g));

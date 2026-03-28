@@ -30,6 +30,8 @@ export interface SpeakOptions {
   maxFrames?: number;
   /** Per-frame progress callback */
   onFrame?: (frame: number, semanticCode: number, acousticCodes: Uint32Array) => void;
+  /** Stage transition callback — called when entering a stage (doneMs=undefined) and when leaving (doneMs=elapsed) */
+  onStage?: (stage: 'backbone' | 'fm' | 'codec', doneMs?: number) => void;
 }
 
 /**
@@ -143,6 +145,7 @@ export class Voxtral {
       voiceEmbeddings,
       options.maxFrames ?? 500,
       options.onFrame,
+      options.onStage,
     );
   }
 

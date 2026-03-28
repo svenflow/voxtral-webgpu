@@ -329,7 +329,7 @@ declare class VoxtralEngine {
      * @param maxFrames - Maximum number of audio frames to generate (default 500 = 40s)
      * @param onFrame - Optional callback per frame for streaming progress
      */
-    generate(tokens: number[], audioTokenStart: number, audioTokenCount: number, voiceEmbeddings: Float32Array | null, maxFrames?: number, onFrame?: (frame: number, semanticCode: number, acousticCodes: Uint32Array) => void): Promise<TTSResult>;
+    generate(tokens: number[], audioTokenStart: number, audioTokenCount: number, voiceEmbeddings: Float32Array | null, maxFrames?: number, onFrame?: (frame: number, semanticCode: number, acousticCodes: Uint32Array) => void, onStage?: (stage: 'backbone' | 'fm' | 'codec', doneMs?: number) => void): Promise<TTSResult>;
     /**
      * Destroy all GPU resources.
      */
@@ -359,6 +359,8 @@ interface SpeakOptions {
     maxFrames?: number;
     /** Per-frame progress callback */
     onFrame?: (frame: number, semanticCode: number, acousticCodes: Uint32Array) => void;
+    /** Stage transition callback — called when entering a stage (doneMs=undefined) and when leaving (doneMs=elapsed) */
+    onStage?: (stage: 'backbone' | 'fm' | 'codec', doneMs?: number) => void;
 }
 /**
  * High-level Voxtral TTS interface.
