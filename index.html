@@ -786,9 +786,7 @@
           return;
         }
 
-        setStatus('loading', 'Initializing WebGPU device...');
-        print('Requesting WebGPU adapter...');
-
+        setStatus('loading', 'Initializing WebGPU...');
         engine = new VoxtralEngine({ maxSeqLen: 2048 });
         await engine.init();
         window._engine = engine;
@@ -866,23 +864,48 @@
       } catch (e) { /* fallback */ }
 
       const safetensorsUrl = useLocal ? localUrl : undefined;
-      if (useLocal) {
-        print('Using local safetensors file');
-      } else {
-        print('Streaming weights from HuggingFace CDN (BF16 → F16)...');
+      if (!useLocal && !loadingFromCache) {
+        print('Downloading weights from HuggingFace...');
       }
+
+      let lastLoggedComponent = '';
+      let cachedCount = 0;
+      let downloadedCount = 0;
 
       await engine.loadWeightsFromHF(safetensorsUrl, (progress) => {
         const pct = Math.round((progress.loaded / Math.max(progress.total, 1)) * 100);
         progressFill.style.width = pct + '%';
-        const mbDown = (progress.bytesDownloaded / (1024 * 1024)).toFixed(0);
-        const cacheTag = progress.cached ? ' [cached]' : '';
-        progressText.textContent = progress.component + ': ' + progress.tensor + cacheTag + ' (' + pct + '%, ' + mbDown + 'MB)';
-        if (progress.loaded % 20 === 0 || progress.loaded === progress.total) {
-          print('[' + pct + '%] ' + progress.component + ': ' + progress.tensor + cacheTag);
+
+        if (progress.cached) {
+          cachedCount++;
+          // For cached loads: just show progress bar, minimal log output
+          progressText.textContent = 'Loading from cache... ' + progress.loaded + '/' + progress.total + ' tensors (' + pct + '%)';
+          // Log only component transitions
+          if (progress.component !== lastLoggedComponent && progress.component !== 'init') {
+            lastLoggedComponent = progress.component;
+            print('Loading ' + progress.component + ' from cache...');
+          }
+        } else {
+          downloadedCount++;
+          // For downloads: show detailed progress
+          const mbDown = (progress.bytesDownloaded / (1024 * 1024)).toFixed(0);
+          progressText.textContent = progress.component + ': ' + progress.tensor + ' (' + pct + '%, ' + mbDown + ' MB downloaded)';
+          // Log component transitions and periodic progress
+          if (progress.component !== lastLoggedComponent && progress.component !== 'init') {
+            lastLoggedComponent = progress.component;
+            print('Downloading ' + progress.component + '...');
+          }
+          if (downloadedCount % 40 === 0) {
+            print('[' + pct + '%] ' + mbDown + ' MB downloaded (' + progress.loaded + '/' + progress.total + ' tensors)');
+          }
         }
       });
 
+      if (cachedCount > 0 && downloadedCount === 0) {
+        print('Loaded ' + cachedCount + ' tensors from cache');
+      } else if (downloadedCount > 0) {
+        print('Downloaded ' + downloadedCount + ' tensors, ' + cachedCount + ' from cache');
+      }
       print('All weights loaded — ready to generate');
 
       // Transition: hide status, show generate
