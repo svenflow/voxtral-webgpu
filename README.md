@@ -5,7 +5,7 @@
 
 **Run Mistral's Voxtral 4B TTS in the browser via WebGPU. 20 voices, 9 languages, 24kHz audio. Zero dependencies.**
 
-[**Live Demo**](https://svenflow.github.io/webgpu-voxtral/) | [npm](https://www.npmjs.com/package/voxtral-webgpu)
+[**Live Demo**](https://svenflow.github.io/voxtral-webgpu/) | [npm](https://www.npmjs.com/package/voxtral-webgpu)
 
 ---
 
@@ -163,13 +163,13 @@ All three stages run entirely on the GPU via 50+ WGSL compute shaders. No WASM, 
 
 ## Benchmarks
 
-Run the [live demo](https://svenflow.github.io/webgpu-voxtral/) to benchmark on your device.
+Run the [live demo](https://svenflow.github.io/voxtral-webgpu/) to benchmark on your device.
 
 ## Development
 
 ```bash
-git clone https://github.com/svenflow/webgpu-voxtral.git
-cd webgpu-voxtral
+git clone https://github.com/svenflow/voxtral-webgpu.git
+cd voxtral-webgpu
 npm install
 npm run dev    # Watch mode
 npm run build  # Production build
