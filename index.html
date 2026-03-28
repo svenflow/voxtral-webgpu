@@ -530,6 +530,10 @@
         <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
         <div class="progress-text" id="progressText"></div>
       </div>
+      <div class="cache-row" id="cacheRow" style="display:none; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;">
+        <span class="cache-info" id="cacheInfo" style="font-size: 0.8em; color: var(--text-dim); font-family: 'SF Mono', 'Fira Code', monospace;"></span>
+        <button class="btn-secondary" id="clearCacheBtn" style="margin-top: 0; font-size: 0.75em; padding: 5px 12px;">Clear Cache</button>
+      </div>
     </div>
 
     <!-- Generate -->
@@ -615,7 +619,6 @@
       <div class="log-container">
         <div class="log" id="log"></div>
       </div>
-      <button class="btn-secondary" id="clearCacheBtn">Clear Weight Cache</button>
     </div>
 
     <!-- How It Works -->
@@ -673,7 +676,7 @@
   </div>
 
   <script type="module">
-    import { VoxtralEngine, TekkenTokenizer, TOKENS, clearWeightCache } from './dist/index.js';
+    import { VoxtralEngine, TekkenTokenizer, TOKENS, clearWeightCache, getWeightCacheInfo } from './dist/index.js';
 
     // ---- DOM refs ----
     const log = document.getElementById('log');
@@ -867,6 +870,7 @@
         print('All weights loaded');
         setStatus('ready', 'Ready to generate');
         generateBtn.disabled = false;
+        updateCacheStatus();
       } catch (e) {
         setStatus('error', 'Initialization failed');
         print('ERROR: ' + e.message);
@@ -1063,10 +1067,30 @@
       }
     }
 
-    // ---- Cache clear ----
+    // ---- Cache status & clear ----
+    async function updateCacheStatus() {
+      try {
+        const info = await getWeightCacheInfo();
+        const cacheRow = document.getElementById('cacheRow');
+        const cacheInfo = document.getElementById('cacheInfo');
+        if (info.count > 0) {
+          const sizeMB = (info.sizeBytes / (1024 * 1024)).toFixed(0);
+          const sizeGB = (info.sizeBytes / (1024 * 1024 * 1024)).toFixed(1);
+          const sizeStr = info.sizeBytes > 1024 * 1024 * 1024 ? sizeGB + ' GB' : sizeMB + ' MB';
+          cacheInfo.textContent = '💾 ' + info.count + ' tensors cached (' + sizeStr + ')';
+          cacheRow.style.display = 'flex';
+        } else {
+          cacheInfo.textContent = 'No cached weights';
+          cacheRow.style.display = 'flex';
+        }
+      } catch (e) { /* ignore */ }
+    }
+    updateCacheStatus();
+
     document.getElementById('clearCacheBtn').addEventListener('click', async () => {
       await clearWeightCache();
       print('IndexedDB weight cache cleared.');
+      await updateCacheStatus();
     });
 
     init();

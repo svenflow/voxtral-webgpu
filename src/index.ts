@@ -21,6 +21,7 @@ export {
   loadComponentBulk,
   loadWeightsFromHF,
   clearWeightCache,
+  getWeightCacheInfo,
   HF_VOXTRAL_URL,
 } from './weights.js';
 export type { WeightManifest, TensorInfo, WeightLoadProgress, ComponentWeights, HFLoadProgress } from './weights.js';

@@ -427,6 +427,32 @@ export async function clearWeightCache(): Promise<void> {
   });
 }
 
+/** Get info about the weight cache: number of tensors and approximate size in bytes. */
+export async function getWeightCacheInfo(): Promise<{ count: number; sizeBytes: number }> {
+  const db = await openWeightDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const store = tx.objectStore(IDB_STORE);
+    const cursorReq = store.openCursor();
+    let count = 0;
+    let sizeBytes = 0;
+    cursorReq.onsuccess = () => {
+      const cursor = cursorReq.result;
+      if (cursor) {
+        count++;
+        const val = cursor.value;
+        if (val instanceof ArrayBuffer) sizeBytes += val.byteLength;
+        else if (val && val.byteLength !== undefined) sizeBytes += val.byteLength;
+        cursor.continue();
+      } else {
+        db.close();
+        resolve({ count, sizeBytes });
+      }
+    };
+    cursorReq.onerror = () => { db.close(); reject(cursorReq.error); };
+  });
+}
+
 // =========================================================================
 // HuggingFace CDN streaming loader with IndexedDB caching
 // =========================================================================
@@ -520,74 +546,116 @@ export async function loadWeightsFromHF(
   // Version key for cache invalidation (based on safetensors header size + tensor count)
   const cacheVersion = `v1:${dataOffset}:${totalTensors}`;
 
-  for (let i = 0; i < tensorEntries.length; i++) {
-    const { name, entry, component } = tensorEntries[i];
-    const cacheKey = `${cacheVersion}:${name}`;
+  // Parallel download with concurrency pool
+  // Fetches up to CONCURRENCY tensors simultaneously for faster downloads
+  const CONCURRENCY = 6;
+  let loadedCount = 0;
 
-    let f16Data: Uint16Array;
-    let fromCache = false;
-
+  // Helper: fetch+convert a single tensor (network-bound work)
+  async function fetchAndConvert(
+    name: string, entry: SafetensorsTensorEntry, cacheKey: string,
+  ): Promise<{ f16Data: Uint16Array; fromCache: boolean; fetchedBytes: number }> {
     // Try IDB cache first
     const cached = await idbGet(db, cacheKey);
     if (cached) {
-      f16Data = new Uint16Array(cached);
-      fromCache = true;
-    } else {
-      // Range request for this tensor
-      const [start, end] = entry.data_offsets;
-      const absStart = dataOffset + start;
-      const absEnd = dataOffset + end - 1;
-      const tensorBytes = end - start;
-
-      const resp = await fetch(safetensorsUrl, {
-        headers: { Range: `bytes=${absStart}-${absEnd}` },
-      });
-      if (!resp.ok && resp.status !== 206) {
-        throw new Error(`Failed to fetch tensor ${name}: HTTP ${resp.status}`);
-      }
-      const buf = await resp.arrayBuffer();
-      bytesDownloaded += tensorBytes;
-
-      // Convert BF16 → F16
-      if (entry.dtype === 'BF16') {
-        const f16Buf = convertBF16toF16(buf);
-        f16Data = new Uint16Array(f16Buf);
-      } else if (entry.dtype === 'F16') {
-        f16Data = new Uint16Array(buf);
-      } else if (entry.dtype === 'F32') {
-        const f32 = new Float32Array(buf);
-        const f16 = new Uint16Array(f32.length);
-        for (let j = 0; j < f32.length; j++) {
-          f16[j] = float32ToFloat16(f32[j]);
-        }
-        f16Data = f16;
-      } else {
-        throw new Error(`Unsupported dtype for ${name}: ${entry.dtype}`);
-      }
-
-      // Cache in IndexedDB (store the underlying ArrayBuffer)
-      await idbPut(db, cacheKey, f16Data.buffer as ArrayBuffer);
+      return { f16Data: new Uint16Array(cached), fromCache: true, fetchedBytes: 0 };
     }
 
-    // Create GPU buffer
-    const gpuBuf = createWeightBuffer(device, f16Data, name);
-    const comp = results[component];
-    comp.buffers.set(name, gpuBuf);
-    comp.tensors.set(name, { shape: entry.shape, buffer: gpuBuf });
+    // Range request for this tensor
+    const [start, end] = entry.data_offsets;
+    const absStart = dataOffset + start;
+    const absEnd = dataOffset + end - 1;
+    const tensorBytes = end - start;
 
-    // Release JS reference — GPU has its own copy
-    // @ts-ignore - help GC
-    f16Data = null!;
+    const resp = await fetch(safetensorsUrl, {
+      headers: { Range: `bytes=${absStart}-${absEnd}` },
+    });
+    if (!resp.ok && resp.status !== 206) {
+      throw new Error(`Failed to fetch tensor ${name}: HTTP ${resp.status}`);
+    }
+    const buf = await resp.arrayBuffer();
 
-    if (onProgress) {
-      onProgress({
-        loaded: i + 1,
-        total: totalTensors,
-        component,
-        tensor: name,
-        cached: fromCache,
-        bytesDownloaded,
-      });
+    // Convert BF16 → F16
+    let f16Data: Uint16Array;
+    if (entry.dtype === 'BF16') {
+      const f16Buf = convertBF16toF16(buf);
+      f16Data = new Uint16Array(f16Buf);
+    } else if (entry.dtype === 'F16') {
+      f16Data = new Uint16Array(buf);
+    } else if (entry.dtype === 'F32') {
+      const f32 = new Float32Array(buf);
+      const f16 = new Uint16Array(f32.length);
+      for (let j = 0; j < f32.length; j++) {
+        f16[j] = float32ToFloat16(f32[j]);
+      }
+      f16Data = f16;
+    } else {
+      throw new Error(`Unsupported dtype for ${name}: ${entry.dtype}`);
+    }
+
+    // Cache in IndexedDB (fire-and-forget OK, but await to ensure persistence)
+    await idbPut(db, cacheKey, f16Data.buffer as ArrayBuffer);
+
+    return { f16Data, fromCache: false, fetchedBytes: tensorBytes };
+  }
+
+  // Process tensors with bounded concurrency
+  // We use a pool: start CONCURRENCY fetches, then as each completes,
+  // we create its GPU buffer and start the next fetch.
+  const pending = new Map<number, Promise<{ idx: number; f16Data: Uint16Array; fromCache: boolean; fetchedBytes: number }>>();
+  let nextToFetch = 0;
+  let nextToProcess = 0;
+  const fetched = new Map<number, { f16Data: Uint16Array; fromCache: boolean; fetchedBytes: number }>();
+
+  // Fill initial pool
+  while (nextToFetch < tensorEntries.length && pending.size < CONCURRENCY) {
+    const idx = nextToFetch++;
+    const { name, entry } = tensorEntries[idx];
+    const cacheKey = `${cacheVersion}:${name}`;
+    pending.set(idx, fetchAndConvert(name, entry, cacheKey).then(r => ({ idx, ...r })));
+  }
+
+  // Process in order
+  while (nextToProcess < tensorEntries.length) {
+    // If we have the next result ready, process it immediately
+    if (fetched.has(nextToProcess)) {
+      const result = fetched.get(nextToProcess)!;
+      fetched.delete(nextToProcess);
+      const { name, entry, component } = tensorEntries[nextToProcess];
+
+      bytesDownloaded += result.fetchedBytes;
+
+      // Create GPU buffer (must be sequential — GPU device is single-threaded)
+      const gpuBuf = createWeightBuffer(device, result.f16Data, name);
+      const comp = results[component];
+      comp.buffers.set(name, gpuBuf);
+      comp.tensors.set(name, { shape: entry.shape, buffer: gpuBuf });
+
+      loadedCount++;
+      if (onProgress) {
+        onProgress({
+          loaded: loadedCount, total: totalTensors, component,
+          tensor: name, cached: result.fromCache, bytesDownloaded,
+        });
+      }
+
+      nextToProcess++;
+      continue;
+    }
+
+    // Wait for any fetch to complete
+    const completed = await Promise.race(pending.values());
+    pending.delete(completed.idx);
+
+    // Store result
+    fetched.set(completed.idx, { f16Data: completed.f16Data, fromCache: completed.fromCache, fetchedBytes: completed.fetchedBytes });
+
+    // Start next fetch if available
+    if (nextToFetch < tensorEntries.length) {
+      const idx = nextToFetch++;
+      const { name, entry } = tensorEntries[idx];
+      const cacheKey = `${cacheVersion}:${name}`;
+      pending.set(idx, fetchAndConvert(name, entry, cacheKey).then(r => ({ idx, ...r })));
     }
   }
 

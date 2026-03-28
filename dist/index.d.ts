@@ -198,6 +198,11 @@ declare function loadComponentWeights(device: GPUDevice, baseUrl: string, manife
 declare function loadComponentBulk(device: GPUDevice, baseUrl: string, manifest: WeightManifest, component: string, onProgress?: (progress: WeightLoadProgress) => void): Promise<ComponentWeights>;
 /** Clear all cached weights. */
 declare function clearWeightCache(): Promise<void>;
+/** Get info about the weight cache: number of tensors and approximate size in bytes. */
+declare function getWeightCacheInfo(): Promise<{
+    count: number;
+    sizeBytes: number;
+}>;
 /** Default HF CDN URL for Voxtral weights */
 declare const HF_VOXTRAL_URL = "https://huggingface.co/mistralai/Voxtral-4B-TTS-2603/resolve/main/consolidated.safetensors";
 /** Progress info for HF streaming loader */
@@ -599,4 +604,4 @@ declare function allclose(actual: Float32Array | Int32Array | Uint32Array, expec
     totalCount: number;
 };
 
-export { type BackboneConfig, type BenchmarkReport, type CodecConfig, type ComponentWeights, type EngineOptions, type FMTransformerConfig, type HFLoadProgress, HF_VOXTRAL_URL, type NpyArray, TOKENS, type TTSResult, TekkenTokenizer, type TensorInfo, type VoxtralConfig, VoxtralEngine, type WeightLoadProgress, type WeightManifest, allclose, clearWeightCache, convertBF16toF16, defaultConfig, loadComponentBulk, loadComponentWeights, loadManifest, loadNpy, loadTensorFromManifest, loadTensorFromSafetensors, loadWeightsFromHF, parseNpy, parseSafetensorsHeader, runBenchmark };
+export { type BackboneConfig, type BenchmarkReport, type CodecConfig, type ComponentWeights, type EngineOptions, type FMTransformerConfig, type HFLoadProgress, HF_VOXTRAL_URL, type NpyArray, TOKENS, type TTSResult, TekkenTokenizer, type TensorInfo, type VoxtralConfig, VoxtralEngine, type WeightLoadProgress, type WeightManifest, allclose, clearWeightCache, convertBF16toF16, defaultConfig, getWeightCacheInfo, loadComponentBulk, loadComponentWeights, loadManifest, loadNpy, loadTensorFromManifest, loadTensorFromSafetensors, loadWeightsFromHF, parseNpy, parseSafetensorsHeader, runBenchmark };
