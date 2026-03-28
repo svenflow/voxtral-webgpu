@@ -812,38 +812,36 @@
         const EXPECTED_TENSORS = 386; // known tensor count for Voxtral 4B
         const totalModelSize = 8.0; // GB approximate
 
+        // Always show button — never auto-download or auto-load
+        const cachedGB = (cacheInfo.sizeBytes / (1024 * 1024 * 1024)).toFixed(1);
+        const remainingGB = Math.max(0, totalModelSize - parseFloat(cachedGB)).toFixed(1);
+        const btnText = document.getElementById('downloadBtnText');
+        const downloadContainer = document.getElementById('downloadBtnContainer');
+
         if (cacheInfo.count >= EXPECTED_TENSORS) {
-          // Fully cached — load directly
           loadingFromCache = true;
-          print('All weights cached in IndexedDB — loading from cache...');
-          await loadWeights();
+          setStatus('ready', 'Model cached — ready to load');
+          btnText.textContent = 'Load Model (cached, ' + cachedGB + ' GB)';
+          print('All ' + cacheInfo.count + ' tensors cached in IndexedDB (' + cachedGB + ' GB). Press load to initialize.');
+        } else if (cacheInfo.count > 0) {
+          setStatus('loading', 'Partially cached (' + cacheInfo.count + '/' + EXPECTED_TENSORS + ' tensors)');
+          btnText.textContent = 'Download Remaining (~' + remainingGB + ' GB)';
+          print(cacheInfo.count + ' tensors cached (' + cachedGB + ' GB). Click download for remaining ~' + remainingGB + ' GB.');
         } else {
-          // Not fully cached — show download button
-          const cachedGB = (cacheInfo.sizeBytes / (1024 * 1024 * 1024)).toFixed(1);
-          const remainingGB = Math.max(0, totalModelSize - parseFloat(cachedGB)).toFixed(1);
-          const btnText = document.getElementById('downloadBtnText');
-          const downloadContainer = document.getElementById('downloadBtnContainer');
-
-          if (cacheInfo.count > 0) {
-            setStatus('loading', 'Partially cached (' + cacheInfo.count + '/' + EXPECTED_TENSORS + ' tensors)');
-            btnText.textContent = 'Download Remaining (~' + remainingGB + ' GB)';
-            print(cacheInfo.count + ' tensors cached (' + cachedGB + ' GB). Click download for remaining ~' + remainingGB + ' GB.');
-          } else {
-            setStatus('loading', 'Model weights required (~8 GB)');
-            btnText.textContent = 'Download Model (~8 GB)';
-            print('Model weights not cached. Click download to stream ~8 GB from HuggingFace CDN.');
-          }
-
-          downloadContainer.style.display = 'block';
-
-          // Wait for user to click download
-          await new Promise(resolve => {
-            document.getElementById('downloadBtn').addEventListener('click', resolve, { once: true });
-          });
-
-          downloadContainer.style.display = 'none';
-          await loadWeights();
+          setStatus('loading', 'Model weights required (~8 GB)');
+          btnText.textContent = 'Download Model (~8 GB)';
+          print('Model weights not cached. Click download to stream ~8 GB from HuggingFace CDN.');
         }
+
+        downloadContainer.style.display = 'block';
+
+        // Wait for user to click
+        await new Promise(resolve => {
+          document.getElementById('downloadBtn').addEventListener('click', resolve, { once: true });
+        });
+
+        downloadContainer.style.display = 'none';
+        await loadWeights();
       } catch (e) {
         setStatus('error', 'Initialization failed');
         print('ERROR: ' + e.message);
