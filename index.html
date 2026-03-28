@@ -486,69 +486,71 @@
       <p>Mistral's Voxtral 4B running via WebGPU. 20 voices, 9 languages, 24kHz audio. No server, no API keys.</p>
     </section>
 
-    <!-- Status -->
-    <div class="card" id="statusCard">
-      <div class="card-title">Engine Status</div>
-      <div class="status-row">
-        <div class="status-dot loading" id="statusDot"></div>
-        <span class="status-text" id="statusText">Checking WebGPU support...</span>
+    <!-- Main card: Status → Generate -->
+    <div class="card" id="mainCard">
+      <!-- Loading state -->
+      <div id="statusSection">
+        <div class="status-row">
+          <div class="status-dot loading" id="statusDot"></div>
+          <span class="status-text" id="statusText">Checking WebGPU support...</span>
+        </div>
+        <div class="progress-container" id="loadProgress">
+          <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
+          <div class="progress-text" id="progressText"></div>
+        </div>
+        <div id="downloadBtnContainer" style="margin-top: 14px; display: none;">
+          <button class="btn" id="downloadBtn" style="margin-top: 0;">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span id="downloadBtnText">Download Model (~8 GB)</span>
+          </button>
+        </div>
       </div>
-      <div class="progress-container" id="loadProgress">
-        <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
-        <div class="progress-text" id="progressText"></div>
-      </div>
-      <div id="downloadBtnContainer" style="margin-top: 14px; display: none;">
-        <button class="btn" id="downloadBtn" style="margin-top: 0;">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span id="downloadBtnText">Download Model (~8 GB)</span>
+
+      <!-- Generate state (hidden until ready) -->
+      <div id="generateSection" style="display: none;">
+        <label for="text">Text</label>
+        <textarea id="text" placeholder="Type something to synthesize...">Hello, this is Voxtral running entirely in your browser using WebGPU compute shaders. No server needed.</textarea>
+
+        <div style="margin-top: 16px;">
+          <label for="voiceSelect">Voice</label>
+          <select id="voiceSelect" class="voice-select">
+            <option value="">Loading voices...</option>
+          </select>
+        </div>
+
+        <button class="btn" id="generateBtn" disabled>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2L14 8L4 14V2Z" fill="currentColor"/></svg>
+          Generate Speech
         </button>
+
+        <!-- Generation progress (shown during inference) -->
+        <div class="gen-progress hidden" id="genProgress">
+          <div class="gen-progress-header">
+            <span class="gen-progress-label">Generating audio...</span>
+            <span class="gen-progress-counter" id="genCounter">Frame 0</span>
+          </div>
+          <div class="progress-bar"><div class="progress-bar-fill" id="genProgressFill"></div></div>
+          <div class="gen-stage" id="genStages">
+            <div class="gen-stage-item" id="stageBackbone">
+              <div class="gen-stage-name">Backbone</div>
+              <div class="gen-stage-time" id="stageBackboneTime">--</div>
+            </div>
+            <div class="gen-stage-item" id="stageFM">
+              <div class="gen-stage-name">FM Decoder</div>
+              <div class="gen-stage-time" id="stageFMTime">--</div>
+            </div>
+            <div class="gen-stage-item" id="stageCodec">
+              <div class="gen-stage-name">Codec</div>
+              <div class="gen-stage-time" id="stageCodecTime">--</div>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <!-- Cache info (always at bottom when visible) -->
       <div class="cache-row" id="cacheRow" style="display:none; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); align-items: center; justify-content: space-between;">
         <span class="cache-info" id="cacheInfo" style="font-size: 0.8em; color: var(--text-dim); font-family: 'SF Mono', 'Fira Code', monospace;"></span>
         <button class="btn-secondary" id="clearCacheBtn" style="margin-top: 0; font-size: 0.75em; padding: 5px 12px;">Clear Cache</button>
-      </div>
-    </div>
-
-    <!-- Generate -->
-    <div class="card">
-      <div class="card-title">Generate Speech</div>
-
-      <label for="text">Text</label>
-      <textarea id="text" placeholder="Type something to synthesize...">Hello, this is Voxtral running entirely in your browser using WebGPU compute shaders. No server needed.</textarea>
-
-      <div style="margin-top: 16px;">
-        <label for="voiceSelect">Voice</label>
-        <select id="voiceSelect" class="voice-select">
-          <option value="">Loading voices...</option>
-        </select>
-      </div>
-
-      <button class="btn" id="generateBtn" disabled>
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2L14 8L4 14V2Z" fill="currentColor"/></svg>
-        Generate Speech
-      </button>
-
-      <!-- Generation progress (shown during inference) -->
-      <div class="gen-progress hidden" id="genProgress">
-        <div class="gen-progress-header">
-          <span class="gen-progress-label">Generating audio...</span>
-          <span class="gen-progress-counter" id="genCounter">Frame 0</span>
-        </div>
-        <div class="progress-bar"><div class="progress-bar-fill" id="genProgressFill"></div></div>
-        <div class="gen-stage" id="genStages">
-          <div class="gen-stage-item" id="stageBackbone">
-            <div class="gen-stage-name">Backbone</div>
-            <div class="gen-stage-time" id="stageBackboneTime">--</div>
-          </div>
-          <div class="gen-stage-item" id="stageFM">
-            <div class="gen-stage-name">FM Decoder</div>
-            <div class="gen-stage-time" id="stageFMTime">--</div>
-          </div>
-          <div class="gen-stage-item" id="stageCodec">
-            <div class="gen-stage-name">Codec</div>
-            <div class="gen-stage-time" id="stageCodecTime">--</div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -812,8 +814,8 @@
 
         if (cacheInfo.count >= EXPECTED_TENSORS) {
           // Fully cached — load directly
+          loadingFromCache = true;
           print('All weights cached in IndexedDB — loading from cache...');
-          setStatus('loading', 'Loading weights from cache...');
           await loadWeights();
         } else {
           // Not fully cached — show download button
@@ -849,8 +851,10 @@
       }
     }
 
+    let loadingFromCache = false;
+
     async function loadWeights() {
-      setStatus('loading', 'Downloading model weights (~8GB)...');
+      setStatus('loading', loadingFromCache ? 'Loading weights from cache...' : 'Downloading model weights (~8GB)...');
 
       // Try local first
       const localUrl = './models/voxtral-tts/consolidated.safetensors';
@@ -878,8 +882,11 @@
         }
       });
 
-      print('All weights loaded');
-      setStatus('ready', 'Ready to generate');
+      print('All weights loaded — ready to generate');
+
+      // Transition: hide status, show generate
+      document.getElementById('statusSection').style.display = 'none';
+      document.getElementById('generateSection').style.display = 'block';
       generateBtn.disabled = false;
       updateCacheStatus();
     }
